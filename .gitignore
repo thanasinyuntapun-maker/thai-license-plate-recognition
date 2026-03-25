@@ -1,0 +1,4 @@
+.env
+plateThai_results/
+__pycache__/
+.DS_Store
