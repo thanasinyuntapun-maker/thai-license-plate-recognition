@@ -4,106 +4,146 @@ import requests
 import numpy as np
 import csv
 import time
+from typing import Optional
 from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
 
-# โหลดค่าตัวแปรความลับจากไฟล์ .env
-load_dotenv() 
+load_dotenv()
 
-# --- 1. ตั้งค่า API และ Path ---
-# ดึง API Key จากไฟล์ .env (ทำให้โค้ดปลอดภัย ส่งให้ใครก็ไม่มี Key หลุด)
-AIFORTHAI_API_KEY = os.getenv("AIFORTHAI_API_KEY") 
+# ==================== CONFIG ====================
+API_KEY = os.getenv("AIFORTHAI_API_KEY")
+if not API_KEY:
+    raise ValueError("ไม่พบ AIFORTHAI_API_KEY ใน .env")
 
-if not AIFORTHAI_API_KEY:
-    print("❌ ไม่พบ API Key! กรุณาสร้างไฟล์ .env และใส่ AIFORTHAI_API_KEY")
-    exit()
+API_URL    = "https://api.aiforthai.in.th/lpr-v2"
+FONT_PATH  = "/System/Library/Fonts/Supplemental/Ayuthaya.ttf"  # Windows: "C:/Windows/Fonts/tahoma.ttf"
+FONT_SIZE  = 60
+DELAY      = 3    # วินาทีระหว่างภาพ
+MAX_RETRY  = 3    # จำนวนครั้ง retry
+TIMEOUT    = 15   # วินาที timeout ต่อ request
 
-URL = "https://api.aiforthai.in.th/lpr-v2"
+BASE_DIR      = os.path.dirname(os.path.abspath(__file__)) if "__file__" in dir() else os.getcwd()
+INPUT_FOLDER  = os.path.join(BASE_DIR, "plateThai")
+OUTPUT_FOLDER = os.path.join(BASE_DIR, "plateThai_results")
+CSV_FILE      = os.path.join(OUTPUT_FOLDER, "plate_report.csv")
 
-# ⚠️ เวลาส่งให้เพื่อน อย่าลืมให้เพื่อนแก้ Path 2 บรรทัดนี้ให้ตรงกับเครื่องของเขาด้วยนะครับ
-INPUT_FOLDER = '/Users/thanasinyuntapun/vscode ai project/vissual/plateThai'
-OUTPUT_FOLDER = "/Users/thanasinyuntapun/vscode ai project/vissual/plateThai_results"
-CSV_FILE = os.path.join(OUTPUT_FOLDER, "plate_report.csv") 
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+# ================================================
 
-if not os.path.exists(OUTPUT_FOLDER): os.makedirs(OUTPUT_FOLDER)
 
-# --- 2. ฟังก์ชันวาดตัวหนังสือภาษาไทย ---
-def draw_thai(img, text, pos):
-    img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    draw = ImageDraw.Draw(img_pil)
-    
-    # ⚠️ ถ้าเพื่อนใช้ Windows อาจจะต้องเปลี่ยน Path ฟอนต์ตรงนี้ด้วย (เช่น "C:/Windows/Fonts/tahoma.ttf")
-    try: font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Ayuthaya.ttf", 60)
-    except: font = ImageFont.load_default()
-    
-    # วาดพื้นหลังสีดำโปร่งแสงให้ตัวหนังสือ
-    text_bbox = draw.textbbox(pos, text, font=font)
-    draw.rectangle([text_bbox[0]-10, text_bbox[1]-10, text_bbox[2]+10, text_bbox[3]+10], fill=(0,0,0,150))
-    draw.text(pos, text, font=font, fill=(0, 255, 0))
-    return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+def load_font(size: int) -> ImageFont.FreeTypeFont:
+    try:
+        return ImageFont.truetype(FONT_PATH, size)
+    except OSError:
+        return ImageFont.load_default()
 
-# --- 3. เริ่มกระบวนการ Batch Processing ---
-print(f"🚀 เริ่มสแกนป้ายทะเบียนด้วย NECTEC API...")
 
-image_files = [f for f in os.listdir(INPUT_FOLDER) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+def draw_thai(img: np.ndarray, text: str, pos: tuple) -> np.ndarray:
+    img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)).convert("RGBA")
+    overlay = Image.new("RGBA", img_pil.size, (0, 0, 0, 0))
+    draw    = ImageDraw.Draw(overlay)
+    font    = load_font(FONT_SIZE)
 
-# เปิดไฟล์ CSV เพื่อบันทึกผลลัพธ์
-with open(CSV_FILE, mode='w', newline='', encoding='utf-8-sig') as csv_file:
-    writer = csv.writer(csv_file)
-    writer.writerow(['ชื่อไฟล์', 'เลขทะเบียน', 'จังหวัด', 'สถานะ'])
+    bbox = draw.textbbox(pos, text, font=font)
+    draw.rectangle([bbox[0]-10, bbox[1]-10, bbox[2]+10, bbox[3]+10], fill=(0, 0, 0, 150))
+    draw.text(pos, text, font=font, fill=(0, 255, 0, 255))
 
-    for index, filename in enumerate(image_files, start=1):
-        input_path = os.path.join(INPUT_FOLDER, filename)
-        output_path = os.path.join(OUTPUT_FOLDER, f"nectec_{filename}")
-        
-        print(f"[{index}/{len(image_files)}] กำลังประมวลผล: {filename}...")
-        
-        image = cv2.imread(input_path)
-        if image is None:
-            writer.writerow([filename, '-', '-', 'Error: อ่านภาพไม่ได้'])
-            continue
+    composited = Image.alpha_composite(img_pil, overlay)
+    return cv2.cvtColor(np.array(composited.convert("RGB")), cv2.COLOR_RGB2BGR)
 
-        # ยิง Request ไปที่ API ของ NECTEC
-        headers = {'Apikey': AIFORTHAI_API_KEY}
-        with open(input_path, 'rb') as file:
-            files = {'image': (filename, file, 'image/jpeg')}
-            try:
-                response = requests.post(URL, headers=headers, files=files)
-                response.raise_for_status()
-                result = response.json()
-            except Exception as e:
-                print(f"   ❌ API Error: {e}")
-                writer.writerow([filename, '-', '-', 'Error: API ล้มเหลว'])
+
+def call_api(image_path: str, filename: str) -> Optional[dict]:
+    headers = {"Apikey": API_KEY}
+    ext  = os.path.splitext(filename)[1].lower()
+    mime = "image/png" if ext == ".png" else "image/jpeg"
+
+    for attempt in range(1, MAX_RETRY + 1):
+        try:
+            with open(image_path, "rb") as f:
+                response = requests.post(
+                    API_URL,
+                    headers=headers,
+                    files={"image": (filename, f, mime)},
+                    timeout=TIMEOUT,
+                )
+
+            if response.status_code == 429:
+                wait = attempt * 5
+                print(f"   ⏳ Rate limit — retry {attempt}/{MAX_RETRY} รอ {wait}s")
+                time.sleep(wait)
                 continue
 
-        # ตรวจสอบผลลัพธ์จาก API
-        if isinstance(result, list) and len(result) > 0:
-            plate = result[0] 
-            plate_text = plate.get('lpr', 'ไม่พบข้อความ')
-            province = plate.get('province_th') or plate.get('province') or 'ไม่ทราบจังหวัด'
-            
-            print(f"   ✅ อ่านได้: {plate_text} {province}")
-            writer.writerow([filename, plate_text, province, 'สำเร็จ'])
-            
-            # วาดกรอบและข้อความลงบนภาพ
-            full_text = f"{plate_text} {province}"
-            bbox = plate.get('bbox', {})
-            
-            if isinstance(bbox, dict) and 'x' in bbox:
-                x, y = int(bbox['x']), int(bbox['y'])
-                w, h = int(bbox.get('width', 0)), int(bbox.get('height', 0))
-                
-                cv2.rectangle(image, (x, y), (x+w, y+h), (0, 0, 255), 4)
-                image = draw_thai(image, full_text, (x, max(0, y-80)))
-            else:
-                image = draw_thai(image, full_text, (50, 50))
-                
-            cv2.imwrite(output_path, image)
-        else:
-            print(f"   ⚠️ ไม่พบป้ายในภาพนี้")
-            writer.writerow([filename, '-', '-', 'ไม่พบป้ายทะเบียน'])
-        
-        # หน่วงเวลา 1 วินาที ป้องกัน Server แบน
-        time.sleep(1)
+            response.raise_for_status()
+            return response.json()
 
-print(f"\n🎉 สแกนเสร็จสมบูรณ์! ข้อมูลถูกบันทึกไว้ที่ plate_report.csv")
+        except requests.exceptions.Timeout:
+            print(f"   ⏳ Timeout — retry {attempt}/{MAX_RETRY}")
+            time.sleep(attempt * 3)
+
+        except Exception as e:
+            print(f"   ❌ API Error: {e}")
+            return None
+
+    return None
+
+
+def process_result(image: np.ndarray, plate: dict, output_path: str):
+    plate_text = plate.get("lpr", "N/A")
+    province   = plate.get("province_th") or plate.get("province") or "ไม่ทราบจังหวัด"
+    label      = f"{plate_text} {province}"
+
+    bbox = plate.get("bbox", {})
+    if isinstance(bbox, dict) and "x" in bbox:
+        x = int(bbox["x"])
+        y = int(bbox["y"])
+        w = int(bbox.get("width", 0))
+        h = int(bbox.get("height", 0))
+        cv2.rectangle(image, (x, y), (x + w, y + h), (0, 0, 255), 4)
+        image = draw_thai(image, label, (x, max(0, y - 80)))
+    else:
+        image = draw_thai(image, label, (50, 50))
+
+    cv2.imwrite(output_path, image)
+    return plate_text, province
+
+
+# ==================== MAIN ====================
+image_files = sorted(
+    f for f in os.listdir(INPUT_FOLDER)
+    if f.lower().endswith((".png", ".jpg", ".jpeg"))
+)
+total = len(image_files)
+print(f"🚀 พบภาพ {total} ไฟล์ — เริ่มสแกนด้วย NECTEC LPR API\n")
+
+with open(CSV_FILE, mode="w", newline="", encoding="utf-8-sig") as csv_f:
+    writer = csv.writer(csv_f)
+    writer.writerow(["filename", "plate", "province", "status"])
+
+    for idx, filename in enumerate(image_files, start=1):
+        input_path  = os.path.join(INPUT_FOLDER, filename)
+        output_path = os.path.join(OUTPUT_FOLDER, f"result_{filename}")
+
+        print(f"[{idx:02d}/{total}] {filename}")
+
+        image = cv2.imread(input_path)
+        if image is None:
+            print("   ⚠️  อ่านภาพไม่ได้ — ข้าม")
+            writer.writerow([filename, "-", "-", "error: read_failed"])
+            continue
+
+        result = call_api(input_path, filename)
+        if result is None:
+            writer.writerow([filename, "-", "-", "error: api_failed"])
+            continue
+
+        if isinstance(result, list) and result:
+            plate_text, province = process_result(image, result[0], output_path)
+            print(f"   ✅ {plate_text}  {province}")
+            writer.writerow([filename, plate_text, province, "success"])
+        else:
+            print("   ⚠️  ไม่พบป้ายทะเบียน")
+            writer.writerow([filename, "-", "-", "no_plate"])
+
+        time.sleep(DELAY)
+
+print(f"\n🎉 เสร็จสมบูรณ์  ผลลัพธ์อยู่ที่: {CSV_FILE}")

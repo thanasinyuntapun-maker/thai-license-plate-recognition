@@ -2,3 +2,7 @@
 plateThai_results/
 __pycache__/
 .DS_Store
+yolovenv/
+remote-kernel/
+*.pyc
+.ipynb_checkpoints/
